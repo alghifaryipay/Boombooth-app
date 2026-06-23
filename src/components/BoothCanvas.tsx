@@ -32,7 +32,7 @@ export default function BoothCanvas({
   const [isFrameLoaded, setIsFrameLoaded] = useState(false);
   const [detectedSlots, setDetectedSlots] = useState<DetectedSlot[]>([]);
 
-  // 1. CACHING TEMPLATE & DETEKSI LUBANG INSTAN VIA DATA URL / BASE64
+  // 1. OTOMATISASI SCANNER LUBANG (AKURASI TINGGI)
   useEffect(() => {
     if (!currentFrame?.src) {
       setIsFrameLoaded(false);
@@ -42,7 +42,9 @@ export default function BoothCanvas({
 
     const img = new Image();
     img.src = currentFrame.src;
-    img.crossOrigin = "anonymous"; // Bypass restriksi CORS browser
+    if (currentFrame.src.startsWith("http")) {
+      img.crossOrigin = "anonymous";
+    }
     
     img.onload = () => {
       frameImageRef.current = img;
@@ -63,57 +65,108 @@ export default function BoothCanvas({
         const imgData = scanCtx.getImageData(0, 0, scanWidth, scanHeight);
         const pixels = imgData.data;
         const computedSlots: DetectedSlot[] = [];
-        const visited = new Uint8Array(scanWidth * scanHeight);
+        
+        // 🌟 KUNCI PERBAIKAN: Step = 2. Akurasi sangat tinggi biar garis bingkai tipis gak kelompatan!
+        const step = 2; 
+        const cols = Math.floor(scanWidth / step);
+        const rows = Math.floor(scanHeight / step);
+        const visited = new Uint8Array(cols * rows);
 
-        // Scan piksel cepat dengan lompatan 6 piksel demi performa real-time
-        const step = 6;
-        for (let y = 0; y < scanHeight; y += step) {
-          for (let x = 0; x < scanWidth; x += step) {
-            const idx = (y * scanWidth + x) * 4;
-            const alpha = pixels[idx + 3]; // Cek channel transparansi (Alpha)
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            if (visited[r * cols + c]) continue;
 
-            if (alpha < 15 && !visited[y * scanWidth + x]) {
-              let minX = x, maxX = x;
-              let minY = y, maxY = y;
+            const pxX = c * step;
+            const pxY = r * step;
+            const idx = (pxY * scanWidth + pxX) * 4;
+            const alpha = pixels[idx + 3];
 
-              for (let sy = y; sy < Math.min(y + 400, scanHeight); sy += step) {
-                let foundInRow = false;
-                for (let sx = Math.max(0, x - 100); sx < Math.min(x + 500, scanWidth); sx += step) {
-                  const sIdx = (sy * scanWidth + sx) * 4;
-                  if (pixels[sIdx + 3] < 15) {
-                    if (sx < minX) minX = sx;
-                    if (sx > maxX) maxX = sx;
-                    if (sy > maxY) maxY = sy;
-                    foundInRow = true;
-                    visited[sy * scanWidth + sx] = 1;
+            if (alpha < 10) { 
+              let minX = pxX, maxX = pxX, minY = pxY, maxY = pxY;
+              const queue: number[] = [c, r];
+              visited[r * cols + c] = 1;
+
+              let head = 0;
+              while (head < queue.length) {
+                const currC = queue[head++];
+                const currR = queue[head++];
+                
+                const cx = currC * step;
+                const cy = currR * step;
+
+                if (cx < minX) minX = cx;
+                if (cx > maxX) maxX = cx;
+                if (cy < minY) minY = cy;
+                if (cy > maxY) maxY = cy;
+
+                const dC = [0, 0, -1, 1];
+                const dR = [-1, 1, 0, 0];
+
+                for (let i = 0; i < 4; i++) {
+                  const nc = currC + dC[i];
+                  const nr = currR + dR[i];
+
+                  if (nc >= 0 && nc < cols && nr >= 0 && nr < rows) {
+                    if (!visited[nr * cols + nc]) {
+                      const nIdx = ((nr * step) * scanWidth + (nc * step)) * 4;
+                      if (pixels[nIdx + 3] < 10) {
+                        visited[nr * cols + nc] = 1;
+                        queue.push(nc, nr);
+                      }
+                    }
                   }
                 }
-                if (!foundInRow && sy > y + 30) break;
               }
 
               const w = maxX - minX;
               const h = maxY - minY;
-
-              if (w > 50 && h > 50) {
+              
+              if (w > 20 && h > 20) {
                 computedSlots.push({ x: minX, y: minY, w, h });
               }
             }
           }
         }
 
-        computedSlots.sort((a, b) => a.y - b.y);
-        setDetectedSlots(computedSlots);
-        onSlotsDetected(computedSlots.length || 3);
+        const canvasArea = scanWidth * scanHeight;
+
+        let validBlobs = computedSlots.filter(s => {
+          const areaPct = (s.w * s.h) / canvasArea;
+          return areaPct >= 0.015 && areaPct <= 0.85; // 1.5% sampai 85% layar
+        });
+
+        // Anti-Overlap (Hapus lubang palsu)
+        validBlobs = validBlobs.filter((blob, i, arr) => {
+          return !arr.some((other, j) => {
+            if (i === j) return false;
+            return blob.x >= other.x - 2 && blob.y >= other.y - 2 && 
+                   (blob.x + blob.w) <= (other.x + other.w + 2) && 
+                   (blob.y + blob.h) <= (other.y + other.h + 2) &&
+                   (blob.w * blob.h < other.w * other.h);
+          });
+        });
+
+        // Urutkan Rapi (Kiri ke Kanan, Atas ke Bawah)
+        validBlobs.sort((a, b) => {
+          if (Math.abs(a.y - b.y) < (Math.max(a.h, b.h) / 2)) {
+            return a.x - b.x;
+          }
+          return a.y - b.y;
+        });
+
+        setDetectedSlots(validBlobs);
+        onSlotsDetected(validBlobs.length || 3);
 
       } catch (err) {
-        console.error("Gagal mendeteksi lubang otomatis:", err);
+        console.error("Gagal mendeteksi lubang:", err);
         setDetectedSlots([]);
         onSlotsDetected(3);
       }
     };
-  }, [currentFrame?.src, onSlotsDetected]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFrame?.src]);
 
-  // 2. HIGH-PERFORMANCE RENDER LOOP LAYER COMPOSTING
+  // 2. RENDER LOOP COMPOSITION
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -132,22 +185,31 @@ export default function BoothCanvas({
         canvas.height = canvasHeight;
       }
 
-      // Bersihkan background canvas dengan warna dasar kertas warm cream
       ctx.fillStyle = "#FDFBF7";
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      // 🌟 TENTUKAN KOORDINAT SLOT (SISTEM PENGAMAN MUTLAK)
       let slots: any[] = [];
+      const frameName = currentFrame?.name?.toLowerCase() || "";
 
+      // SMART FALLBACK
       if (detectedSlots.length === 0) {
-        // BYPASS: Jika deteksi piksel transparan zonk/0, langsung paksa pakai koordinat cetak Koran lo!
-        slots = [
-          { xPct: 39.5, yPct: 43.6, wPct: 53.0, hPct: 22.0 }, // Slot Tengah Besar Utama
-          { xPct: 7.6,  yPct: 68.3, wPct: 27.5, hPct: 14.8 }, // Slot Bawah Kiri
-          { xPct: 65.0, yPct: 68.3, wPct: 27.5, hPct: 14.8 }, // Slot Bawah Kanan
-        ];
+        if (frameName.includes("koran") || frameName.includes("inspirasi")) {
+          slots = [
+            { xPct: 39.5, yPct: 43.6, wPct: 53.0, hPct: 22.0 },
+            { xPct: 7.6,  yPct: 68.3, wPct: 27.5, hPct: 14.8 },
+            { xPct: 65.0, yPct: 68.3, wPct: 27.5, hPct: 14.8 },
+          ];
+        } else {
+          const totalSlots = 3;
+          const marginX = 8, startY = 10, endY = 85, gap = 3;     
+          const hPct = ((endY - startY) - (gap * (totalSlots - 1))) / totalSlots;
+          const wPct = 100 - (marginX * 2);
+
+          for (let i = 0; i < totalSlots; i++) {
+            slots.push({ xPct: marginX, yPct: startY + i * (hPct + gap), wPct, hPct });
+          }
+        }
       } else {
-        // Jika sukses mendeteksi lubang transparan (pada frame lain), ubah pixel ke persentase canvas aktual
         slots = detectedSlots.map(slot => ({
           xPct: (slot.x / canvasWidth) * 100,
           yPct: (slot.y / canvasHeight) * 100,
@@ -156,7 +218,7 @@ export default function BoothCanvas({
         }));
       }
 
-      // Komposisikan penempatan foto ke tiap koordinat slot yang aktif
+      // LAYER FOTO (Di bawah bingkai)
       slots.forEach((slot, index) => {
         const x = (slot.xPct / 100) * canvasWidth;
         const y = (slot.yPct / 100) * canvasHeight;
@@ -166,9 +228,8 @@ export default function BoothCanvas({
         ctx.save();
         ctx.beginPath();
         ctx.rect(x, y, w, h);
-        ctx.clip(); // Masking pangkas area luar kotak slot
+        ctx.clip(); 
 
-        // RUMUS OBJECT-FIT COVER MATEMATIS (FOTO DIJAMIN PROPORSIONAL & TIDAK GEPENG)
         const drawCover = (source: HTMLCanvasElement | HTMLVideoElement, isMirror: boolean) => {
           const sWidth = (source instanceof HTMLVideoElement) ? source.videoWidth : source.width;
           const sHeight = (source instanceof HTMLVideoElement) ? source.videoHeight : source.height;
@@ -196,7 +257,6 @@ export default function BoothCanvas({
           ctx.filter = applyToneFilter(activeFilter);
 
           if (isMirror) {
-            // Mirroring tepat di poros tengah slot masing-masing
             ctx.translate(x + w / 2, y + h / 2);
             ctx.scale(-1, 1);
             ctx.translate(-(x + w / 2), -(y + h / 2));
@@ -207,20 +267,18 @@ export default function BoothCanvas({
         };
 
         if (capturedPhotos[index]) {
-          // Layer A: Tampilkan hasil foto statis jika sudah dijepret
           drawCover(capturedPhotos[index], false);
         } else if (index === activeSlotIndex && videoElement && videoElement.readyState >= 2) {
-          // Layer B: Tampilkan live capture mirror jika slot aktif membidik kamera
           drawCover(videoElement, true);
         } else {
-          // Layer C: Sesi standby box kosong sebelum dijepret
-          ctx.fillStyle = "#FAF6EE";
+          ctx.fillStyle = "rgba(234, 234, 234, 0.5)";
           ctx.fillRect(x, y, w, h);
         }
+        
         ctx.restore();
       });
 
-      // LAYER OVERLAY BINGKAI: Selalu gambar bingkai cetakan di lapisan paling atas
+      // LAYER BINGKAI (Di atas menutupi sudut foto)
       if (frameImageRef.current && isFrameLoaded) {
         ctx.drawImage(frameImageRef.current, 0, 0, canvasWidth, canvasHeight);
       }
@@ -230,9 +288,7 @@ export default function BoothCanvas({
 
     renderLoop();
 
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-    };
+    return () => cancelAnimationFrame(animationFrameId);
   }, [capturedPhotos, videoElement, activeFilter, activeSlotIndex, isFrameLoaded, detectedSlots]);
 
   function applyToneFilter(filter: string) {

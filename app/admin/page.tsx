@@ -1,213 +1,384 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useRef, useEffect, useTransition } from "react";
+import BoothCamera from "@/components/BoothCamera";
+import BoothCanvas from "@/components/BoothCanvas";
+import FrameSelector from "@/components/FrameSelector";
+import { DynamicFrame } from "@/types/frame";
+import QRCode from "qrcode";
 
-interface FrameItem {
-  id: string;
-  name: string;
-  src: string;
-}
+export default function PhotoboothPage() {
+  const [framesList, setFramesList] = useState<DynamicFrame[]>([]);
+  const [currentFrame, setCurrentFrame] = useState<DynamicFrame | null>(null);
+  
+  // 🌟 MEMORI ANTI-BASI: Pakai useRef agar tidak kecolongan state lama
+  const [slotsCount, setSlotsCount] = useState<number>(3);
+  const slotsCountRef = useRef<number>(3); 
+  
+  const [activeSlotIndex, setActiveSlotIndex] = useState<number>(-1);
 
-export default function AdminUploadFrame() {
-  const [frameName, setFrameName] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [framesList, setFramesList] = useState<FrameItem[]>([]);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState("");
-  const [status, setStatus] = useState<{ type: "success" | "error" | null; msg: string }>({ type: null, msg: "" });
+  const [capturedPhotos, setCapturedPhotos] = useState<HTMLCanvasElement[]>([]);
+  const [activeFilter, setActiveFilter] = useState<string>("normal");
+  const [triggerSnap, setTriggerSnap] = useState<boolean>(false);
+  const [isSessionActive, setIsSessionActive] = useState<boolean>(false);
+  const [isReviewing, setIsReviewing] = useState<boolean>(false); 
+  
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [finalImage, setFinalImage] = useState<string | null>(null);
+  const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
+  const [showQrModal, setShowQrModal] = useState<boolean>(false);
+  const [step, setStep] = useState<"landing" | "booth" | "result">("landing");
+  const [isUploading, startUploadTransition] = useTransition();
 
-  // Load daftar frame yang bisa dipakai orang lain saat halaman dibuka
-  const fetchFrames = async () => {
-    try {
-      const res = await fetch("/api/frames");
-      const data = await res.json();
-      if (Array.isArray(data)) setFramesList(data);
-    } catch (err) {
-      console.error("Gagal load katalog frame");
-    }
-  };
+  const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetchFrames();
+    async function loadTemplates() {
+      try {
+        const response = await fetch("/api/frames");
+        const data = await response.json();
+        if (data && data.length > 0) {
+          setFramesList(data);
+          setCurrentFrame(data[0]);
+        }
+      } catch (err) {
+        console.error("Gagal sinkronisasi API:", err);
+      }
+    }
+    loadTemplates();
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
-    }
-  };
+  async function startPhotoSession() {
+    if (!currentFrame) return;
 
-  // Handler Upload Frame Baru
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!file || !frameName) return;
+    setStep("booth");
+    setFinalImage(null);
+    setQrCodeUrl(null);
+    setCapturedPhotos([]);
+    setActiveSlotIndex(0);
+    setIsReviewing(false);
 
-    setLoading(true);
-    setStatus({ type: null, msg: "" });
+    setTimeout(async () => {
+      if (videoContainerRef.current) {
+        const video = videoContainerRef.current.querySelector("video");
+        if (video) setVideoElement(video);
+      }
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("name", frameName);
+      setIsSessionActive(true);
+      
+      // 🌟 KUNCI: Tarik data fresh dari useRef, bukan dari useState yang sering telat
+      const totalSlots = slotsCountRef.current; 
+
+      for (let i = 0; i < totalSlots; i++) {
+        setActiveSlotIndex(i);
+
+        for (let count = 3; count > 0; count--) {
+          setCountdown(count);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        setCountdown(null);
+        
+        setTriggerSnap(true);
+
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+
+      setActiveSlotIndex(-1);
+
+      // FASE REVIEW: Tahan kamera, persilakan ganti filter
+      setTimeout(() => {
+        setIsSessionActive(false);
+        setIsReviewing(true); 
+      }, 600);
+    }, 400);
+  }
+
+  // FUNGSI LANJUT KE HASIL: Dieksekusi saat user puas pilih filter
+  async function handleFinalizeSession() {
+    const finalCanvas = document.getElementById("boombooth-core-canvas") as HTMLCanvasElement | null;
+    if (!finalCanvas) return;
 
     try {
-      const res = await fetch("/api/upload-frame", { method: "POST", body: formData });
-      const result = await res.json();
+      setStep("result");
+      setIsReviewing(false);
 
-      if (result.success) {
-        setStatus({ type: "success", msg: `Frame "${result.frame.name}" berhasil disimpan!` });
-        setFrameName("");
-        setFile(null);
-        const input = document.getElementById("file-input") as HTMLInputElement;
-        if (input) input.value = "";
-        fetchFrames(); // Refresh list katalog
-      } else {
-        setStatus({ type: "error", msg: result.error || "Gagal mengunggah." });
-      }
+      // 🌟 KEMBALI KE BLOB BINER (Ukuran JAUH lebih kecil dari Base64)
+      finalCanvas.toBlob((blob) => {
+        if (!blob) return;
+
+        // Tampilkan foto di layar (Pakai URL Lokal sementara biar instan)
+        setFinalImage(URL.createObjectURL(blob));
+
+        startUploadTransition(async () => {
+          try {
+            const formData = new FormData();
+            formData.append("file", blob, `boombooth-${Date.now()}.png`);
+
+            // Kirim murni sebagai file binary (Tanpa header JSON)
+            const uploadResponse = await fetch("/api/upload", {
+              method: "POST",
+              body: formData,
+            });
+
+            // 🌟 PENGAMAN: Jika server membalas dengan HTML Error (<!DOCTYPE...)
+            if (!uploadResponse.ok) {
+              const errText = await uploadResponse.text();
+              console.error("Server membalas error:", errText);
+              throw new Error(`Upload ditolak server (Status: ${uploadResponse.status})`);
+            }
+
+            const uploadResult = await uploadResponse.json();
+
+            if (uploadResult.success && uploadResult.url) {
+              const qrSvg = await QRCode.toDataURL(uploadResult.url, {
+                margin: 1, width: 180, color: { dark: "#111111", light: "#ffffff" }
+              });
+              setQrCodeUrl(qrSvg);
+            }
+          } catch (err: any) {
+            console.error("🚨 Error Upload Server:", err.message);
+            alert("Gagal sinkron ke server: " + err.message);
+          }
+        });
+      }, "image/png", 0.90);
+
     } catch (err) {
-      setStatus({ type: "error", msg: "Gagal tersambung ke server." });
-    } finally {
-      setLoading(false);
+      console.error("Gagal mengeksport gambar:", err);
     }
-  };
-
-  // Handler Hapus Frame
-  const handleDelete = async (id: string) => {
-    if (!confirm("Yakin mau hapus frame ini dari sistem secara permanen, Bos?")) return;
-
-    try {
-      const res = await fetch(`/api/upload-frame?id=${id}`, { method: "DELETE" });
-      const result = await res.json();
-
-      if (result.success) {
-        setStatus({ type: "success", msg: "Frame berhasil didelete dari server!" });
-        fetchFrames();
-      } else {
-        setStatus({ type: "error", msg: result.error || "Gagal menghapus." });
-      }
-    } catch (err) {
-      setStatus({ type: "error", msg: "Gagal memproses hapus data." });
-    }
-  };
-
-  // Handler Simpan Perubahan Nama (Edit)
-  const handleSaveEdit = async (id: string) => {
-    if (!editingName.trim()) return;
-
-    try {
-      const res = await fetch("/api/upload-frame", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, newName: editingName }),
-      });
-      const result = await res.json();
-
-      if (result.success) {
-        setStatus({ type: "success", msg: "Nama frame berhasil diperbarui!" });
-        setEditingId(null);
-        setEditingName("");
-        fetchFrames();
-      } else {
-        setStatus({ type: "error", msg: result.error || "Gagal update nama." });
-      }
-    } catch (err) {
-      setStatus({ type: "error", msg: "Gagal edit data." });
-    }
-  };
+  }
 
   return (
-    <main className="min-h-screen bg-[#FAF8F5] p-6 md:p-12 font-sans text-[#1A1A1A] flex flex-col gap-8 items-center">
-      {/* SECTION FORM UPLOAD */}
-      <div className="max-w-xl w-full bg-white border border-[#EFEBE1] rounded-3xl p-8 shadow-[0_8px_32px_rgba(229,222,209,0.12)]">
-        <div className="border-b border-[#FAF8F5] pb-4 mb-6">
-          <h1 className="font-serif text-2xl font-bold italic">BoomBooth Engine</h1>
-          <p className="text-[9px] text-[#8A8172] tracking-widest uppercase font-bold">Upload Frame Hub</p>
+    <main className="min-h-screen bg-[#FAF8F5] text-[#1A1A1A] antialiased font-sans selection:bg-[#EAE4D7] overflow-x-hidden">
+      <header className="border-b border-[#EFEBE1] bg-[#FAF8F5]/80 backdrop-blur-md sticky top-0 z-50 px-4 md:px-8 py-3 md:py-4.5 flex items-center justify-between">
+        <div className="flex items-center gap-2 cursor-pointer select-none" onClick={() => setStep("landing")}>
+          <span className="font-serif text-lg md:text-xl tracking-tight font-bold italic">BoomBooth<span className="text-[#C5BBA6] font-sans font-normal not-italic text-[9px] md:text-xs ml-0.5">®</span></span>
         </div>
+        <div className="text-[9px] md:text-[10px] font-semibold tracking-wider uppercase text-[#7A7161] bg-[#F1EBE0] px-2.5 py-1 md:px-3 md:py-1.5 rounded-full border border-[#E5DEC1]/40">
+          Studio Active
+        </div>
+      </header>
 
-        {status.type && (
-          <div className={`mb-5 p-4 rounded-xl text-xs font-medium border ${
-            status.type === "success" ? "bg-green-50 border-green-200 text-green-700" : "bg-red-50 border-red-200 text-red-700"
-          }`}>
-            {status.msg}
+      {/* 🏛️ STEP 1: LANDING */}
+      {step === "landing" && (
+        <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-12 md:pb-16 text-center transform-gpu animate-fadeIn select-none">
+          <span className="text-[9px] md:text-[10px] uppercase font-bold tracking-[0.25em] md:tracking-[0.3em] text-[#B8AF9E] mb-3 block">
+            Interactive Capture Terminal
+          </span>
+          <h1 className="font-serif text-4xl sm:text-5xl md:text-6xl font-normal tracking-tight text-[#111111] mb-4 md:mb-5 leading-[1.12]">
+            Capture moments, <br />
+            <span className="italic font-light text-[#8A7E6A]">perfectly preserved.</span>
+          </h1>
+          <p className="font-sans text-[11px] sm:text-xs md:text-sm text-[#7A7161] max-w-lg mx-auto mb-8 md:mb-10 leading-relaxed font-light px-2">
+            Sistem photo-booth minimalis modern. Pilih tema cetak koran estetik, ambil gambar lewat kamera, dan dapatkan QR code unduhan instan.
+          </p>
+          
+          <div className="bg-white rounded-2xl md:rounded-3xl p-4 sm:p-6 md:p-8 border border-[#EFEBE1] shadow-[0_12px_40px_rgba(229,222,209,0.12)] mb-8 md:mb-10 text-left relative overflow-hidden">
+            <FrameSelector database={framesList} selectedFrame={currentFrame} onSelectFrame={setCurrentFrame} />
+            
+            {/* 🌟 PRE-LOADER LUBANG (SCANNER TAK KASAT MATA) */}
+            <div className="absolute opacity-0 pointer-events-none w-0 h-0 overflow-hidden">
+              <BoothCanvas
+                currentFrame={currentFrame}
+                capturedPhotos={[]}
+                videoElement={null}
+                activeFilter="normal"
+                onSlotsDetected={(count) => {
+                  if(count > 0) {
+                    setSlotsCount(count); 
+                    slotsCountRef.current = count; // Langsung hafal ke memori instan
+                  }
+                }}
+                activeSlotIndex={-1}
+              />
+            </div>
           </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-          <div>
-            <label className="text-[10px] uppercase font-bold tracking-widest text-[#8A8172] block mb-1.5">Nama Frame Baru</label>
-            <input
-              type="text" required placeholder="Contoh: Koran Wisuda, Polaroid Square"
-              value={frameName} onChange={(e) => setFrameName(e.target.value)}
-              className="w-full bg-[#FAF8F5] border border-[#EFEBE1] rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#111111]"
-            />
-          </div>
-
-          <div>
-            <label className="text-[10px] uppercase font-bold tracking-widest text-[#8A8172] block mb-1.5">File Template (.webp bolong/transparan)</label>
-            <input
-              id="file-input" type="file" required accept=".webp" onChange={handleFileChange}
-              className="w-full bg-[#FAF8F5] border border-[#EFEBE1] rounded-xl px-4 py-3 text-xs font-mono focus:outline-none"
-            />
-          </div>
-
+          
           <button
-            type="submit" disabled={loading}
-            className="w-full bg-[#111111] hover:bg-[#2B2722] text-[#FAF8F5] py-3.5 rounded-full font-semibold text-xs tracking-widest uppercase transition-all disabled:opacity-40"
+            onClick={startPhotoSession}
+            className="inline-flex items-center gap-3 md:gap-4 bg-[#111111] hover:bg-[#2B2722] text-[#FAF8F5] px-8 py-3.5 md:px-12 md:py-4 rounded-full font-sans font-semibold text-[10px] md:text-xs tracking-widest uppercase transition-all shadow-md hover:shadow-xl active:scale-[0.98]"
           >
-            {loading ? "Menyimpan..." : "Upload Premium Frame"}
+            Buka Kamera Studio
+            <svg className="w-3.5 h-3.5 transform translate-y-[-0.5px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
           </button>
-        </form>
-      </div>
+        </div>
+      )}
 
-      {/* SECTION MANAJEMEN KATALOG (EDIT & HAPUS) */}
-      <div className="max-w-xl w-full bg-white border border-[#EFEBE1] rounded-3xl p-8 shadow-[0_8px_32px_rgba(229,222,209,0.12)]">
-        <h2 className="text-[11px] uppercase font-bold tracking-widest text-[#8A8172] mb-4">Daftar Aktif Frame Studio ({framesList.length})</h2>
-        
-        {framesList.length === 0 ? (
-          <p className="text-xs text-[#B8AF9E] italic text-center py-4">Belum ada frame yang ter-upload di katalog.</p>
-        ) : (
-          <div className="flex flex-col gap-3">
-            {framesList.map((frame) => (
-              <div key={frame.id} className="flex items-center justify-between p-3.5 bg-[#FAF8F5] rounded-xl border border-[#EFEBE1] gap-4">
-                <div className="flex-1 min-w-0">
-                  {editingId === frame.id ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text" value={editingName} onChange={(e) => setEditingName(e.target.value)}
-                        className="bg-white border border-[#EFEBE1] rounded-lg px-2 py-1 text-xs focus:outline-none flex-1"
-                      />
-                      <button onClick={() => handleSaveEdit(frame.id)} className="text-[10px] font-bold text-green-600 uppercase">Save</button>
-                      <button onClick={() => setEditingId(null)} className="text-[10px] font-bold text-gray-400 uppercase">Batal</button>
-                    </div>
-                  ) : (
-                    <div>
-                      <p className="text-xs font-semibold text-[#111111] truncate">{frame.name}</p>
-                      <p className="text-[9px] text-[#B8AF9E] font-mono truncate">{frame.id}.webp</p>
-                    </div>
-                  )}
+      {/* 📸 STEP 2: LIVE STUDIO CAPTURE GRID */}
+      {step === "booth" && (
+        <div className="w-full max-w-4xl mx-auto px-4 md:px-6 py-4 md:py-6 transform-gpu animate-fadeIn select-none">
+          <div className="grid grid-cols-1 md:grid-cols-10 gap-5 md:gap-6 items-start justify-center">
+            
+            <div className="md:col-span-4 flex flex-col gap-4">
+              <div className="bg-white rounded-2xl md:rounded-3xl p-4 md:p-5 border border-[#EFEBE1] shadow-[0_8px_24px_rgba(229,222,209,0.08)]">
+                <div className="flex items-center justify-between mb-3 border-b border-[#FAF8F5] pb-2">
+                  <span className="text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-[#8A8172] flex items-center gap-2">
+                    <span className={`h-1.5 w-1.5 rounded-full bg-[#111111] ${!isReviewing && "animate-pulse"}`} /> 
+                    {isReviewing ? "Session Done" : "Live Viewport"}
+                  </span>
                 </div>
-
-                <div className="flex items-center gap-3 shrink-0">
-                  {editingId !== frame.id && (
-                    <button
-                      onClick={() => { setEditingId(frame.id); setEditingName(frame.name); }}
-                      className="text-[10px] font-bold text-[#8A7E6A] hover:text-[#111111] uppercase tracking-wider"
-                    >
-                      Edit
-                    </button>
+                <div ref={videoContainerRef} className="relative aspect-[4/3] w-full bg-[#151515] rounded-xl overflow-hidden border border-[#EFEBE1] shadow-inner transform-gpu">
+                  <BoothCamera
+                    isCapturing={isSessionActive}
+                    triggerSnap={triggerSnap}
+                    onCapture={(canvas: HTMLCanvasElement) => setCapturedPhotos((prev) => [...prev, canvas])}
+                    onSnapDone={() => setTriggerSnap(false)}
+                  />
+                  {countdown !== null && (
+                    <div className="absolute inset-0 bg-[#FAF8F5]/10 backdrop-blur-xs flex items-center justify-center transition-all z-10">
+                      <div className="font-serif italic text-5xl md:text-6xl text-[#111111] animate-scaleIn drop-shadow-lg">
+                        {countdown}
+                      </div>
+                    </div>
                   )}
-                  <button
-                    onClick={() => handleDelete(frame.id)}
-                    className="text-[10px] font-bold text-red-500 hover:text-red-700 uppercase tracking-wider"
-                  >
-                    Hapus
-                  </button>
+                  {isReviewing && (
+                    <div className="absolute inset-0 bg-[#111111]/40 backdrop-blur-sm flex items-center justify-center transition-all z-10">
+                      <div className="font-sans font-semibold text-[10px] text-white tracking-widest uppercase text-center px-4 leading-relaxed">
+                        Tentukan Tone & Filter<br/><span className="text-[#B8AF9E]">Lalu Lanjut Cetak</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            ))}
+
+              {/* FILTER PANEL */}
+              <div className={`bg-white rounded-2xl p-4 md:p-5 border border-[#EFEBE1] shadow-xs transition-all ${isReviewing ? "ring-2 ring-[#111111]/10 transform-gpu scale-[1.02]" : ""}`}>
+                <p className="text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-[#8A8172] mb-3">Tone Mood</p>
+                <div className="grid grid-cols-3 gap-1.5 md:gap-2">
+                  {[
+                    { id: "normal", name: "Original" },
+                    { id: "grayscale", name: "B&W" },
+                    { id: "vintage", name: "Warm" }
+                  ].map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => setActiveFilter(f.id)}
+                      className={`py-2 px-1 rounded-xl border text-center font-semibold text-[10px] md:text-[11px] tracking-tight transition-all ${activeFilter === f.id
+                          ? "bg-[#111111] border-[#111111] text-white"
+                          : "bg-white border-[#EFEBE1] text-[#7A7161] hover:border-[#111111]"
+                        }`}
+                    >
+                      {f.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="md:col-span-6 flex flex-col justify-center items-center w-full">
+              <div className="bg-white rounded-2xl md:rounded-3xl p-4 md:p-6 border border-[#EFEBE1] shadow-[0_8px_24px_rgba(229,222,209,0.08)] flex flex-col items-center w-full max-w-[280px] sm:max-w-[320px] md:max-w-[340px]">
+                <p className="w-full text-center text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-[#8A8172] border-b border-[#FAF8F5] pb-2 mb-3 md:mb-4">
+                  Live Strip Composition
+                </p>
+                <div className="w-full p-2 md:p-2.5 bg-[#FAF8F5] border border-[#EFEBE1] rounded-2xl shadow-inner transform-gpu [image-rendering:pixelated]">
+                  <BoothCanvas
+                    currentFrame={currentFrame}
+                    capturedPhotos={capturedPhotos || []}
+                    videoElement={videoElement}
+                    activeFilter={activeFilter}
+                    onSlotsDetected={setSlotsCount}
+                    activeSlotIndex={activeSlotIndex}
+                  />
+                </div>
+              </div>
+
+              {isReviewing && (
+                <button
+                  onClick={handleFinalizeSession}
+                  className="mt-6 inline-flex items-center gap-3 bg-[#111111] hover:bg-[#2B2722] text-[#FAF8F5] px-8 py-3.5 rounded-full font-sans font-semibold text-[10px] md:text-[11px] tracking-widest uppercase transition-all shadow-md active:scale-[0.98] animate-fadeIn"
+                >
+                  Lanjut Cetak & Download
+                  <svg className="w-3.5 h-3.5 transform translate-y-[-0.5px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                  </svg>
+                </button>
+              )}
+            </div>
+
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* 🏁 STEP 3: SCREEN HASIL AKHIR & DOWNLOAD */}
+      {step === "result" && (
+        <div className="w-full max-w-md mx-auto px-4 py-8 md:py-12 text-center transform-gpu animate-fadeIn">
+          <div className="bg-white rounded-2xl md:rounded-3xl p-5 md:p-7 border border-[#EFEBE1] shadow-[0_12px_40px_rgba(229,222,209,0.3)] flex flex-col items-center mx-2 sm:mx-0">
+            <h2 className="font-serif text-xl md:text-2xl font-normal text-[#111111] mb-1">Memories Archived.</h2>
+            <p className="text-[10px] md:text-[11px] text-[#8A8172] mb-5 md:mb-6 font-light">Lembar cetak digital Anda siap diunduh ke galeri.</p>
+
+            <div className="w-full max-w-[200px] md:max-w-[240px] p-2 md:p-2.5 bg-[#FAF8F5] border border-[#EFEBE1] rounded-xl mb-6 shadow-inner transform-gpu [image-rendering:pixelated]">
+              <BoothCanvas
+                currentFrame={currentFrame}
+                capturedPhotos={capturedPhotos || []}
+                videoElement={null}
+                activeFilter={activeFilter}
+                onSlotsDetected={setSlotsCount}
+                activeSlotIndex={-1}
+              />
+            </div>
+
+            <div className="w-full grid grid-cols-2 gap-2.5 md:gap-3">
+              <button
+                onClick={() => setShowQrModal(true)}
+                className="w-full bg-[#F4EFE6] hover:bg-[#EFEBE1] text-[#111111] py-3 md:py-3.5 rounded-full font-semibold text-[10px] md:text-[11px] tracking-wider uppercase transition-all border border-[#E5DEC1] flex items-center justify-center gap-2"
+              >
+                Wireless QR
+              </button>
+              {finalImage ? (
+                <a
+                  href={finalImage}
+                  download={`boombooth-${Date.now()}.png`}
+                  className="w-full bg-[#111111] hover:bg-[#2B2722] text-white py-3 md:py-3.5 rounded-full font-semibold text-[10px] md:text-[11px] tracking-wider uppercase transition-all text-center flex items-center justify-center gap-2 shadow-xs"
+                >
+                  Save Image
+                </a>
+              ) : (
+                <div className="w-full bg-[#111111]/40 text-white py-3 md:py-3.5 rounded-full font-semibold text-[10px] md:text-[11px] tracking-wider uppercase flex items-center justify-center gap-2 animate-pulse">
+                  Rendering...
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={() => setStep("landing")}
+              className="mt-6 text-[10px] md:text-xs font-medium text-[#8A8172] hover:text-[#111111] transition-all underline underline-offset-4"
+            >
+              Take Another Session
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 📱 SCREEN POP-UP MODAL QR */}
+      {showQrModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-6 bg-[#111111]/15 backdrop-blur-md transform-gpu animate-fadeIn">
+          <div className="bg-white max-w-[260px] md:max-w-[280px] w-full rounded-2xl border border-[#EFEBE1] p-4 md:p-5 text-center shadow-2xl animate-scaleIn">
+            <div className="flex justify-between items-center mb-4 border-b border-[#FAF8F5] pb-2">
+              <h3 className="font-bold text-[9px] md:text-[10px] uppercase tracking-widest text-[#8A8172]">Scan to Phone</h3>
+              <button onClick={() => setShowQrModal(false)} className="h-6 w-6 rounded-full bg-[#FAF8F5] hover:bg-[#EFEBE1] flex items-center justify-center text-xs">✕</button>
+            </div>
+
+            <div className="w-36 h-36 md:w-40 md:h-40 mx-auto bg-white p-2 border border-[#EFEBE1] rounded-xl flex items-center justify-center shadow-inner">
+              {isUploading ? (
+                <div className="flex flex-col items-center gap-2">
+                  <div className="w-4 h-4 border-2 border-[#111111] border-t-transparent rounded-full animate-spin" />
+                  <span className="text-[9px] font-bold text-[#8A8172] uppercase tracking-wider">Uploading</span>
+                </div>
+              ) : qrCodeUrl ? (
+                <img src={qrCodeUrl} className="w-full h-full object-contain" alt="QR Link" />
+              ) : (
+                <div className="text-[9px] font-semibold text-red-500">Generating Link...</div>
+              )}
+            </div>
+
+            <div className="mt-4 text-[8px] md:text-[9px] font-bold text-[#C5BBA6] bg-[#FAF8F5] py-1.5 rounded-full border border-[#EFEBE1] uppercase tracking-widest">
+              🔒 Local Secure Server
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
