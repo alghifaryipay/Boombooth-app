@@ -13,5 +13,10 @@
     "id": "koran-v2",
     "name": "Koran v2",
     "src": "/frames/koran-v2.webp"
+  },
+  {
+    "id": "birthday-v1",
+    "name": "Birthday v1",
+    "src": "/frames/birthday-v1.webp"
   }
 ]

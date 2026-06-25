@@ -10,13 +10,21 @@ import QRCode from "qrcode";
 export default function PhotoboothPage() {
   const [framesList, setFramesList] = useState<DynamicFrame[]>([]);
   const [currentFrame, setCurrentFrame] = useState<DynamicFrame | null>(null);
+  
+  // 🌟 MEMORI ANTI-TELAT: Buat deteksi jumlah lubang sebelum foto dimulai
   const [slotsCount, setSlotsCount] = useState<number>(3);
+  const slotsCountRef = useRef<number>(3);
+  
   const [activeSlotIndex, setActiveSlotIndex] = useState<number>(-1);
 
   const [capturedPhotos, setCapturedPhotos] = useState<HTMLCanvasElement[]>([]);
   const [activeFilter, setActiveFilter] = useState<string>("normal");
   const [triggerSnap, setTriggerSnap] = useState<boolean>(false);
   const [isSessionActive, setIsSessionActive] = useState<boolean>(false);
+  
+  // 🌟 FITUR BARU: Jeda Review
+  const [isReviewing, setIsReviewing] = useState<boolean>(false);
+  
   const [countdown, setCountdown] = useState<number | null>(null);
   const [finalImage, setFinalImage] = useState<string | null>(null);
   const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
@@ -51,6 +59,7 @@ export default function PhotoboothPage() {
     setQrCodeUrl(null);
     setCapturedPhotos([]);
     setActiveSlotIndex(0);
+    setIsReviewing(false); // Pastikan mulai tanpa status review
 
     setTimeout(async () => {
       if (videoContainerRef.current) {
@@ -60,7 +69,10 @@ export default function PhotoboothPage() {
 
       setIsSessionActive(true);
 
-      for (let i = 0; i < slotsCount; i++) {
+      // Ambil jumlah lubang dari memori yang sudah di-scan di halaman depan
+      const totalSlots = slotsCountRef.current;
+
+      for (let i = 0; i < totalSlots; i++) {
         setActiveSlotIndex(i);
 
         for (let count = 3; count > 0; count--) {
@@ -76,64 +88,76 @@ export default function PhotoboothPage() {
 
       setActiveSlotIndex(-1);
 
-      setTimeout(async () => {
-        const finalCanvas = document.getElementById("boombooth-core-canvas") as HTMLCanvasElement | null;
-        if (finalCanvas) {
-          try {
-            setStep("result");
-
-            // 🌟 BYPASS FORM-DATA: Ubah canvas jadi teks Base64 langsung (Anti Error 500)
-            const base64Image = finalCanvas.toDataURL("image/png", 0.90);
-            
-            // Tampilkan instan di layar
-            setFinalImage(base64Image);
-
-            startUploadTransition(async () => {
-              try {
-                // Kirim sebagai JSON murni, bukan FormData
-                const uploadResponse = await fetch("/api/upload", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ image: base64Image }),
-                });
-
-                const uploadResult = await uploadResponse.json();
-
-                if (!uploadResponse.ok) {
-                  throw new Error(uploadResult.error || "Server menolak data gambar");
-                }
-
-                if (uploadResult.success && uploadResult.url) {
-                  // Jika berhasil, buatkan QR Code-nya
-                  const qrSvg = await QRCode.toDataURL(uploadResult.url, {
-                    margin: 1, width: 180, color: { dark: "#111111", light: "#ffffff" }
-                  });
-                  setQrCodeUrl(qrSvg);
-                }
-              } catch (err: any) {
-                console.error("🚨 Error Upload Server:", err.message);
-                alert("Gagal sinkron ke server: " + err.message);
-              }
-            });
-
-          } catch (err) {
-            console.error("Gagal mengeksport gambar:", err);
-          }
-        }
+      // 🌟 JEDA REVIEW: Kamera berhenti, tunggu aksi dari user
+      setTimeout(() => {
         setIsSessionActive(false);
+        setIsReviewing(true);
       }, 600);
     }, 400);
   }
 
+  // 🌟 FUNGSI LANJUT CETAK (Kirim ke Vercel Blob pakai FormData)
+  async function handleFinalizeSession() {
+    const finalCanvas = document.getElementById("boombooth-core-canvas") as HTMLCanvasElement | null;
+    if (!finalCanvas) return;
+
+    try {
+      setStep("result");
+      setIsReviewing(false);
+
+      // Gunakan toBlob agar payloadnya berupa file murni (sangat kecil & aman dari Error 500)
+      finalCanvas.toBlob((blob) => {
+        if (!blob) return;
+
+        // Tampilkan foto di layar dulu (lokal)
+        setFinalImage(URL.createObjectURL(blob));
+
+        startUploadTransition(async () => {
+          try {
+            const formData = new FormData();
+            formData.append("file", blob, `boombooth-${Date.now()}.jpg`);
+
+            // Kirim ke API tanpa headers JSON, biarkan browser atur multipart/form-data
+            const uploadResponse = await fetch("/api/upload", {
+              method: "POST",
+              body: formData,
+            });
+
+            if (!uploadResponse.ok) {
+              const errText = await uploadResponse.text();
+              throw new Error(`Upload ditolak server: ${errText}`);
+            }
+
+            const uploadResult = await uploadResponse.json();
+
+            // Generate QR Code jika berhasil dapat URL dari Vercel
+            if (uploadResult.success && uploadResult.url) {
+              const qrSvg = await QRCode.toDataURL(uploadResult.url, {
+                margin: 1, width: 180, color: { dark: "#111111", light: "#ffffff" }
+              });
+              setQrCodeUrl(qrSvg);
+            }
+          } catch (err: any) {
+            console.error("🚨 Error Upload Server:", err.message);
+            alert("Gagal sinkron ke server: " + err.message);
+          }
+        });
+      }, "image/png", 0.85);
+
+    } catch (err) {
+      console.error("Gagal mengeksport gambar:", err);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-[#FAF8F5] text-[#1A1A1A] antialiased font-sans selection:bg-[#EAE4D7] overflow-x-hidden">
-      {/* 🧭 NAVIGATION BAR: Padding dikecilkan di layar HP (px-4) */}
+      {/* 🧭 NAVIGATION BAR */}
       <header className="border-b border-[#EFEBE1] bg-[#FAF8F5]/80 backdrop-blur-md sticky top-0 z-50 px-4 md:px-8 py-3 md:py-4.5 flex items-center justify-between">
         <div className="flex items-center gap-2 cursor-pointer select-none" onClick={() => setStep("landing")}>
           <span className="font-serif text-lg md:text-xl tracking-tight font-bold italic">BoomBooth<span className="text-[#C5BBA6] font-sans font-normal not-italic text-[9px] md:text-xs ml-0.5">®</span></span>
         </div>
         <div className="text-[9px] md:text-[10px] font-semibold tracking-wider uppercase text-[#7A7161] bg-[#F1EBE0] px-2.5 py-1 md:px-3 md:py-1.5 rounded-full border border-[#E5DEC1]/40">
-          Studio Active
+          Studio v1.0
         </div>
       </header>
 
@@ -141,19 +165,35 @@ export default function PhotoboothPage() {
       {step === "landing" && (
         <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 pt-6 pb-12 md:pb-16 text-center transform-gpu animate-fadeIn select-none">
           <span className="text-[9px] md:text-[10px] uppercase font-bold tracking-[0.25em] md:tracking-[0.3em] text-[#B8AF9E] mb-3 block">
-            Interactive Capture Terminal
+            Photobooth Dimana Saja, Kapan Saja
           </span>
-          {/* Tulisan utama menyesuaikan layar (text-4xl di HP, 6xl di Laptop) */}
           <h1 className="font-serif text-4xl sm:text-5xl md:text-6xl font-normal tracking-tight text-[#111111] mb-4 md:mb-5 leading-[1.12]">
             Capture moments, <br />
             <span className="italic font-light text-[#8A7E6A]">perfectly preserved.</span>
           </h1>
           <p className="font-sans text-[11px] sm:text-xs md:text-sm text-[#7A7161] max-w-lg mx-auto mb-8 md:mb-10 leading-relaxed font-light px-2">
-            Sistem photo-booth minimalis modern. Pilih tema cetak koran estetik, ambil gambar lewat kamera, dan dapatkan QR code unduhan instan.
+            Sistem Photobooth digital praktis. Pilih tema, ambil gambar lewat kamera, dan Scan QR untuk dukung Boombooth.
           </p>
           
-          <div className="bg-white rounded-2xl md:rounded-3xl p-4 sm:p-6 md:p-8 border border-[#EFEBE1] shadow-[0_12px_40px_rgba(229,222,209,0.12)] mb-8 md:mb-10 text-left">
+          <div className="bg-white rounded-2xl md:rounded-3xl p-4 sm:p-6 md:p-8 border border-[#EFEBE1] shadow-[0_12px_40px_rgba(229,222,209,0.12)] mb-8 md:mb-10 text-left relative overflow-hidden">
             <FrameSelector database={framesList} selectedFrame={currentFrame} onSelectFrame={setCurrentFrame} />
+            
+            {/* 🌟 PRE-LOADER LUBANG (SCANNER TAK KASAT MATA) */}
+            <div className="absolute opacity-0 pointer-events-none w-0 h-0 overflow-hidden">
+              <BoothCanvas
+                currentFrame={currentFrame}
+                capturedPhotos={[]}
+                videoElement={null}
+                activeFilter="normal"
+                onSlotsDetected={(count) => {
+                  if(count > 0) {
+                    setSlotsCount(count); 
+                    slotsCountRef.current = count; // Kunci ke memori instan
+                  }
+                }}
+                activeSlotIndex={-1}
+              />
+            </div>
           </div>
           
           <button
@@ -171,14 +211,14 @@ export default function PhotoboothPage() {
       {/* 📸 STEP 2: LIVE STUDIO CAPTURE GRID */}
       {step === "booth" && (
         <div className="w-full max-w-4xl mx-auto px-4 md:px-6 py-4 md:py-6 transform-gpu animate-fadeIn select-none">
-          {/* Di HP bakal numpuk (1 kolom), di Laptop jadi 10 kolom bersampingan */}
           <div className="grid grid-cols-1 md:grid-cols-10 gap-5 md:gap-6 items-start justify-center">
             
             <div className="md:col-span-4 flex flex-col gap-4">
               <div className="bg-white rounded-2xl md:rounded-3xl p-4 md:p-5 border border-[#EFEBE1] shadow-[0_8px_24px_rgba(229,222,209,0.08)]">
                 <div className="flex items-center justify-between mb-3 border-b border-[#FAF8F5] pb-2">
                   <span className="text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-[#8A8172] flex items-center gap-2">
-                    <span className="h-1.5 w-1.5 rounded-full bg-[#111111] animate-pulse" /> Live Viewport
+                    <span className={`h-1.5 w-1.5 rounded-full bg-[#111111] ${!isReviewing && "animate-pulse"}`} /> 
+                    {isReviewing ? "Session Done" : "Live Viewport"}
                   </span>
                 </div>
                 <div ref={videoContainerRef} className="relative aspect-[4/3] w-full bg-[#151515] rounded-xl overflow-hidden border border-[#EFEBE1] shadow-inner transform-gpu">
@@ -195,10 +235,19 @@ export default function PhotoboothPage() {
                       </div>
                     </div>
                   )}
+                  {/* OVERLAY MODE REVIEW */}
+                  {isReviewing && (
+                    <div className="absolute inset-0 bg-[#111111]/40 backdrop-blur-sm flex items-center justify-center transition-all z-10">
+                      <div className="font-sans font-semibold text-[10px] text-white tracking-widest uppercase text-center px-4 leading-relaxed">
+                        Tentukan Tone & Filter<br/><span className="text-[#B8AF9E]">Lalu Lanjut Cetak</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="bg-white rounded-2xl p-4 md:p-5 border border-[#EFEBE1] shadow-xs">
+              {/* FILTER PANEL */}
+              <div className={`bg-white rounded-2xl p-4 md:p-5 border border-[#EFEBE1] shadow-xs transition-all ${isReviewing ? "ring-2 ring-[#111111]/10 transform-gpu scale-[1.02]" : ""}`}>
                 <p className="text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-[#8A8172] mb-3">Tone Mood</p>
                 <div className="grid grid-cols-3 gap-1.5 md:gap-2">
                   {[
@@ -221,8 +270,7 @@ export default function PhotoboothPage() {
               </div>
             </div>
 
-            <div className="md:col-span-6 flex justify-center w-full">
-              {/* Ukuran lebar canvas preview disesuaikan biar gak mentok layar HP */}
+            <div className="md:col-span-6 flex flex-col justify-center items-center w-full">
               <div className="bg-white rounded-2xl md:rounded-3xl p-4 md:p-6 border border-[#EFEBE1] shadow-[0_8px_24px_rgba(229,222,209,0.08)] flex flex-col items-center w-full max-w-[280px] sm:max-w-[320px] md:max-w-[340px]">
                 <p className="w-full text-center text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-[#8A8172] border-b border-[#FAF8F5] pb-2 mb-3 md:mb-4">
                   Live Strip Composition
@@ -238,7 +286,21 @@ export default function PhotoboothPage() {
                   />
                 </div>
               </div>
+
+              {/* 🌟 TOMBOL LANJUT CETAK (MUNCUL PAS JEDA) */}
+              {isReviewing && (
+                <button
+                  onClick={handleFinalizeSession}
+                  className="mt-6 inline-flex items-center gap-3 bg-[#111111] hover:bg-[#2B2722] text-[#FAF8F5] px-8 py-3.5 rounded-full font-sans font-semibold text-[10px] md:text-[11px] tracking-widest uppercase transition-all shadow-md active:scale-[0.98] animate-fadeIn"
+                >
+                  Lanjut Cetak & Download
+                  <svg className="w-3.5 h-3.5 transform translate-y-[-0.5px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                  </svg>
+                </button>
+              )}
             </div>
+
           </div>
         </div>
       )}
